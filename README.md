@@ -244,6 +244,104 @@ Salida de `scripts/demo.ps1` el 25/11/2026:
 
 ---
 
-## Respuestas a las preguntas de la sección 03
+## Respuestas a las preguntas estructurales (sección 03)
 
-> _Pendiente de completar._
+### 1. Impacto relacional vs. analytics
+
+**¿Por qué mantener logs en SQL Server es un anti-patrón a escala?**
+
+SQL Server está optimizado para OLTP: muchas escrituras y lecturas pequeñas, por fila, con bloqueos y log transaccional. Un log de auditoría tiene el perfil opuesto: escribe una vez, casi nunca se actualiza, crece sin límite y se consulta en barridos analíticos ("todas las transferencias de la cuenta X en 2025"). Cuando ambos perfiles conviven en la misma base:
+
+- **Compiten por los mismos recursos.** Cada página de auditoría que entra al *buffer pool* desplaza páginas calientes del negocio. Cada INSERT de auditoría escribe en el mismo log transaccional que las transacciones críticas. Las consultas de auditoría (barridos grandes) generan I/O y bloqueos que afectan la latencia del core.
+- **El mantenimiento crece con el volumen y no con el valor.** Reconstrucción de índices, `DBCC CHECKDB`, backups y restauraciones tardan más por datos que nadie consulta en línea. El RTO del core empeora por culpa de la auditoría.
+- **Borrar es caro y riesgoso.** Purgar millones de filas genera log, escalamiento de bloqueos y fragmentación. Por eso estas tablas suelen crecer para siempre.
+- **El almacenamiento más caro guarda los datos más fríos.** Almacenamiento en bloque provisionado, multiplicado por réplicas (Multi-AZ o Always On), más backups y más la licencia por núcleo, que se dimensiona según la carga total.
+
+**Métrica de costo-beneficio propuesta**
+
+No hay un único número. Propongo evaluar tres dimensiones, medidas antes y después del offloading:
+
+| Dimensión | Métrica | Antes (SQL Server) | Después (Iceberg) |
+|---|---|---|---|
+| **Costo de retención** | USD por GB-mes retenido × copias | Almacenamiento de base de datos × réplicas + backups | Object storage, una copia (la durabilidad la da S3), Parquet comprimido |
+| **Impacto en el core** | p95 de latencia de escritura, tamaño del log, ventana de backup/`CHECKDB` | Crece con el histórico | Acotado: el outbox solo guarda la ventana de retención (minutos u horas) |
+| **Costo de consulta analítica** | USD y segundos por consulta de auditoría típica | Compite con el OLTP | Cómputo bajo demanda (Athena/Glue/EMR) con poda de particiones y columnas |
+
+**Orden de magnitud** (ilustrativo; se valida con la calculadora de AWS para el caso real):
+
+- S3 Standard cuesta **USD 0.023 por GB-mes** en us-east-1 ([precios S3](https://aws.amazon.com/s3/pricing/)). El almacenamiento de RDS ronda **USD 0.115 por GB-mes** (gp2, ejemplo oficial de [RDS Custom](https://aws.amazon.com/rds/custom/pricing/)), unas **5 veces más por GB**. Y eso antes de multiplicar por réplicas, backups e IOPS.
+- A eso se suma la compresión columnar. **Medido en esta PoC:** 1 300 eventos de silver ocupan 73 KB en Parquet+zstd, **unos 57 bytes por evento**, incluyendo una copia del JSON crudo. La misma fila en SQL Server (columnas, `NVARCHAR(MAX)` en UTF-16 e índices) ocupa varias veces más.
+- Con lifecycle a Glacier para datos de más de un año, el costo marginal de retener un año más de auditoría tiende a cero.
+
+**Regla de decisión:** el offloading se justifica cuando *(costo mensual de retención en SQL Server + costo de la degradación del core)* > *(costo de S3 + costo de cómputo de ingesta y mantenimiento + costo operativo del pipeline)*. Con volúmenes de auditoría que crecen sin límite, el lado izquierdo crece linealmente y el derecho casi no, así que el punto de equilibrio llega pronto. El beneficio no financiero, y el más importante, es que **el core deja de degradarse con el tiempo**.
+
+### 2. Criterio de herramientas: PySpark vs. dbt, y el papel de Glue/Catalog
+
+| Herramienta | Responsabilidad exacta | Por qué ella y no la otra |
+|---|---|---|
+| **PySpark** | **Mover y operar datos:** ingesta streaming Kafka → bronze (`ingest_bronze.py`), con checkpoints y exactly-once hacia Iceberg. También el **mantenimiento físico** de las tablas (`maintenance.py`: compactación, manifests, expiración de snapshots). | Son tareas imperativas, con estado (offsets, checkpoints), de larga duración y cercanas al almacenamiento. dbt no hace streaming ni opera archivos. |
+| **dbt** | **Lógica de negocio declarativa** sobre datos ya aterrizados: bronze → silver (deduplicación con `MERGE`, tipado, interpretación por `schema_version`) → gold (agregados). También **tests de calidad** (`unique`, `not_null`, `accepted_values`), linaje y documentación. | Son transformaciones SQL versionadas en Git, revisables en un PR y testeables. Cualquier analista puede auditarlas, y no quedan escondidas en código Python. |
+
+**Frontera clara:** PySpark nunca contiene reglas de negocio (bronze es una copia fiel), y dbt nunca toca Kafka ni archivos. Si mañana cambia el bus (Kafka → Kinesis), solo cambia el job de PySpark. Si cambia una regla de negocio, solo cambia un modelo dbt.
+
+**Por qué Glue Data Catalog facilita la gobernanza sin rehacer el modelo:**
+- **El modelo no cambia, solo el catálogo.** Las tablas son Iceberg y los jobs las nombran como `lakehouse.bronze.audit_events`. Pasar de local a AWS es cambiar `catalog-impl` a `GlueCatalog` en [`spark-defaults.conf`](spark/conf/spark-defaults.conf). En dbt se cambia el adaptador a `dbt-glue`, y los modelos SQL siguen siendo los mismos.
+- **Un solo metastore para todos los motores.** Glue Jobs, Athena, EMR y Redshift Spectrum ven las mismas tablas, esquemas y particiones, sin copias ni ETL entre herramientas.
+- **Gobernanza centralizada.** Con Lake Formation sobre el catálogo hay permisos por base, tabla, columna y fila, y etiquetas (LF-Tags) para datos sensibles. Todo se audita en CloudTrail, sin reescribir tablas ni modelos.
+- **Mantenimiento administrado.** El Data Catalog ofrece optimizadores de compactación, retención de snapshots y borrado de archivos huérfanos, que se activan por tabla o para todo el catálogo ([AWS Glue: Optimizing Iceberg tables](https://docs.aws.amazon.com/glue/latest/dg/table-optimizers.html)). `maintenance.py` se vuelve opcional en AWS.
+
+### 3. Resiliencia y consistencia: caída de la ingesta durante un pico
+
+La arquitectura tiene **dos amortiguadores durables en serie** y ningún punto que guarde eventos solo en memoria:
+
+```
+API ──(misma transacción)──► Outbox (SQL Server) ──► Redpanda/Kafka (7 días) ──► Spark (checkpoint) ──► Iceberg
+          amortiguador 1: si Kafka cae      amortiguador 2: si Spark cae      replay desde offsets
+```
+
+**Escenario A: cae la ingesta (Spark) durante un pico.**
+- La API y el relay no se enteran: siguen escribiendo y publicando. Los eventos se acumulan en el topic, que retiene 7 días (`retention.ms`).
+- Al volver, Spark lee el **último offset confirmado en su checkpoint** y procesa el atraso. `maxOffsetsPerTrigger=50000` hace de contrapresión para no saturarse.
+- Iceberg confirma cada micro-batch de forma atómica junto con su offset, así que no quedan escrituras parciales ni micro-batches duplicados.
+
+**Escenario B: cae el bus (Kafka) o el relay.**
+- La API sigue confirmando transacciones: el evento ya quedó en `audit.OutboxEvents` dentro de la misma transacción del negocio.
+- El relay reintenta cada 5 s. Las filas pendientes (`PublishedAt IS NULL`) **nunca se purgan**, porque la retención solo borra lo ya publicado.
+- Cuando el bus vuelve, el relay vacía el atraso en lotes de 500.
+
+**Garantía de cero pérdida:** un evento solo deja de existir en una capa después de estar confirmado en la siguiente. El outbox se marca como publicado tras el ack de Kafka (`acks=all`, productor idempotente). Kafka retiene 7 días. Spark avanza el offset solo cuando Iceberg confirmó el commit.
+
+**Mecanismo de replay, de más fino a más grueso:**
+1. **Automático:** Spark reanuda desde su checkpoint.
+2. **Re-proceso desde Kafka:** un checkpoint nuevo con `startingOffsets` en un offset o timestamp dado relee hasta 7 días. Los duplicados que produzca son inocuos, porque silver hace `MERGE` por `event_id`.
+3. **Re-proceso desde bronze:** bronze es inmutable y guarda el JSON crudo, así que `dbt build --full-refresh` reconstruye silver y gold desde cero. Con *time travel* de Iceberg se puede leer el estado exacto de una fecha anterior.
+
+**Prueba reproducible en la PoC:**
+```powershell
+docker compose stop spark-ingest                                    # simula la caída
+Invoke-RestMethod -Method Post "http://localhost:8081/api/simulate?count=1000"   # pico de carga
+docker compose run --rm spark-sql -e "SELECT count(*) FROM bronze.audit_events"  # no aumenta
+docker compose start spark-ingest                                   # se recupera
+# ~60 s después: el conteo aumenta en 1000 y no aparecen duplicados en silver tras dbt build
+```
+
+**Riesgos que asumo y cómo se cerrarían en producción:**
+- Si la ingesta estuviera caída **más tiempo que la retención de Kafka**, se perderían eventos del topic. Mitigación: alarma sobre el *consumer lag* y una retención de Kafka mucho mayor que el tiempo de recuperación esperado.
+- En la PoC el outbox se purga a los 10 minutos de publicado, **sin verificar que el evento llegó a bronze**. En producción la purga debería condicionarse a la marca de agua del lakehouse (máximo offset confirmado en bronze), para que el outbox sea también un respaldo de replay.
+- La PoC usa un solo broker con replicación 1. En producción: MSK con `replication.factor=3` y `min.insync.replicas=2`.
+
+### 4. Control del output de IA
+
+Ver el detalle completo en [`docs/ai-usage.md`](docs/ai-usage.md). El caso más claro:
+
+**Sugerencia errónea:** la IA armó el entorno con **MinIO** (`minio/minio` y `minio/mc`) como S3 local, la opción "de manual" en casi todos los tutoriales de Iceberg. Lo presentó como algo listo para usar, sin verificar que las imágenes existieran. En la primera ejecución real, `docker compose up` falló con `pull access denied for minio/mc`: MinIO había retirado sus imágenes públicas de Docker Hub y de quay.io en 2026. La IA respondió con conocimiento desactualizado y con la seguridad de quien no tiene dudas.
+
+**Corrección con criterio:**
+- **No aceptar "debería funcionar":** la falla apareció porque se ejecutó el entorno de verdad en lugar de dar por bueno un compose que "se veía bien".
+- **No parchear con un mirror no oficial** de MinIO (hay varios en Docker Hub), porque sería meter en la cadena de suministro una imagen de un tercero desconocido.
+- Se reemplazó por **SeaweedFS** (API S3, Apache 2.0), y el bucket se crea con la **aws-cli oficial**. Así la PoC depende del **protocolo S3** y no de un proveedor.
+- **Regla adoptada:** antes de usar cualquier imagen o versión sugerida por la IA, se verifica en el registro real que exista y esté mantenida.
+
+**Otras dos correcciones del mismo tipo:**
+- La IA sugirió `wsl --install` como paso estándar, y en este equipo devolvió **403**. Se resolvió activando las características de Windows con `dism` y usando `wsl --update --web-download`.
+- La IA incluyó `remove_orphan_files` en el mantenimiento y lo describió como parte de la solución, sin aclarar que en Iceberg 1.6 no funciona con `s3://` sin el conector `hadoop-aws`. Al ejecutarlo falló. Se documentó como un límite consciente en vez de esconderlo.

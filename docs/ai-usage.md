@@ -1,81 +1,81 @@
 # C. Uso orquestado de IA
 
-**Asistente:** Claude (Anthropic), usado como par técnico durante toda la prueba: análisis del enunciado, preparación del entorno, generación de código y documentación.
+**Asistente:** Claude (Anthropic), en una sola conversación de trabajo. Se usó como par técnico para analizar el enunciado, preparar el entorno en Windows, generar el código (.NET, PySpark, dbt, Docker Compose) y redactar la documentación.
 
-**Regla de trabajo:** la IA propone y el humano decide, valida y corrige. Abajo están los prompts clave y, sobre todo, los puntos donde la respuesta de la IA fue genérica o incorrecta y hubo que intervenir.
-
----
-
-## 1. Análisis del enunciado y plan
-
-**Prompt clave**
-> Se pegó el contexto de negocio, el reto (A–D) y los requisitos de entrega: "analiza la información y tracemos una línea para empezar".
-
-**Aporte de la IA:** comparó Outbox, CDC y buffer asíncrono, propuso capas bronze/silver/gold en Iceberg y un plan en seis fases.
-
-**Corrección humana**
-- La IA empezó a pedir y suponer contenido del enunciado que no se le había entregado. Se le indicó que trabajara solo con la información disponible.
-- La IA ofreció Outbox, CDC y buffer como opciones equivalentes. La elección se hizo con el requisito literal "sin pérdida de eventos", que descarta el buffer en memoria, y con el criterio de bajo acoplamiento al esquema físico, que descarta CDC como primera opción.
-
-## 2. Preparación del entorno (Windows, 16 GB de RAM)
-
-**Problemas reales**
-- El instalador de Docker Desktop falló porque faltaba *Virtual Machine Platform*.
-- `wsl --install` devolvió **HTTP 403**.
-
-**Respuesta genérica de la IA:** "ejecuta `wsl --install`". Eso no funcionó en este equipo.
-
-**Solución aplicada:**
-1. Activar las características con `dism.exe` (`VirtualMachinePlatform`, `Microsoft-Windows-Subsystem-Linux`).
-2. Instalar el motor con `wsl --update --web-download`.
-3. Limitar WSL a 10 GB con `.wslconfig`.
-
-El presupuesto de 16 GB de RAM condicionó todo el diseño del compose: límites de memoria por servicio y dbt sin Thrift Server.
-
-## 3. AWS Glue en local
-
-**Riesgo típico de la IA:** sugerir que "Glue se levanta en Docker" o usar LocalStack. El **Glue Data Catalog no tiene un emulador local oficial**, y en LocalStack es una función de pago.
-
-**Decisión humana:** usar un catálogo Iceberg REST como sustituto y documentar que en AWS solo cambia `catalog-impl`. Se eligieron versiones de Spark e Iceberg alineadas con Glue 4.0/5.0 para que los jobs sean portables.
-
-## 4. Imagen de Spark
-
-**Primera propuesta de la IA:** la imagen de terceros `tabulario/spark-iceberg`, la del quickstart de Iceberg.
-
-**Decisión:** construir una imagen propia sobre `apache/spark:3.5.3` con las jars exactas (Iceberg 1.6.1, AWS bundle y conector Kafka). Razones:
-- control de versiones
-- paridad con Glue
-- evitar procesos innecesarios (Jupyter, Thrift, History Server) que consumen RAM
-
-## 5. dbt
-
-- La IA fijó **dbt 1.9**. Al validar el proyecto, dbt avisó que esa versión ya no recibe parches, y se subió a **dbt-core/dbt-spark 1.11**.
-- La sintaxis de tests generada (`accepted_values` con argumentos sueltos) disparaba una advertencia de deprecación en 1.11. Se corrigió a `data_tests` con `arguments:`.
-- La IA propuso dbt contra un Spark Thrift Server. Se cambió al modo `session`, que no necesita un servicio permanente y ahorra unos 2 GB de RAM.
-
-## 6. Una dependencia que desapareció: MinIO
-
-**Qué pasó:** la IA propuso MinIO como sustituto local de S3, la opción "de manual". En la primera ejecución real, `docker compose up` falló con `pull access denied for minio/mc`: MinIO había retirado sus imágenes públicas de Docker Hub y de quay.io en 2026. La IA no lo anticipó porque su conocimiento base era anterior a ese cambio.
-
-**Decisión:** no depender de mirrors no oficiales. Se reemplazó por **SeaweedFS** (API S3, Apache 2.0) y el bucket se crea con la **aws-cli oficial**, de modo que la PoC solo depende del protocolo S3 y no de un proveedor concreto. Antes de cambiar, se verificó que cada imagen nueva existe en Docker Hub.
-
-**Lección:** en infraestructura, toda sugerencia de la IA sobre imágenes o versiones se valida contra el registro real antes de darla por buena.
-
-## 7. Verificaciones hechas (sin confiar solo en la IA)
-
-- `docker compose config` para validar la sintaxis del compose.
-- `dbt parse` y `dbt ls`: el proyecto compila (2 modelos, 6 tests, 1 source).
-- La lógica de bronze (parseo del envelope, cuarentena de mensajes malformados) y de silver/gold (deduplicación por `event_id`, coexistencia v1/v2) se probó en Spark local con datos sintéticos que incluían un duplicado y un mensaje corrupto.
-- **Ejecución end-to-end real** en Windows con `scripts/demo.ps1`: la API y el relay compilaron y corrieron, el streaming llenó bronze, dbt pasó sus tests y la compactación quedó registrada como snapshots `replace`. Los números están en el README (sección D).
-- La IA no anticipó dos problemas que aparecieron recién al ejecutar: `remove_orphan_files` no funciona con `s3://` en Iceberg 1.6 sin `hadoop-aws`, y la descarga desde `mcr.microsoft.com` se agotaba en esta red. Se documentó el primero como límite consciente y el segundo se resolvió descargando las imágenes por adelantado con `docker pull` (más una imagen base menos).
-
-## 8. Puntos donde se exigió precisión técnica
-
-- **Lock escalation:** la purga se hace en lotes de **menos de 5000 filas**, el umbral de escalamiento de bloqueos de SQL Server.
-- **Particionamiento:** se rechazó particionar por cuenta (alta cardinalidad, más archivos pequeños). Se usó `days(occurred_at)` con hidden partitioning.
-- **Copy-on-write vs. merge-on-read:** para auditoría (append-only, borrados raros) se eligió COW para priorizar la lectura.
-- **Semántica de entrega:** se documentó honestamente como at-least-once en el relay más deduplicación en silver, en lugar de prometer exactly-once de punta a punta.
+**Cómo leer este documento.** Separo honestamente tres cosas distintas:
+1. **Errores de la IA detectados por la ejecución real o por mí**: las correcciones humanas propiamente dichas.
+2. **Auto-correcciones de la IA**: la IA cambió su propia propuesta sin que yo interviniera. No las presento como mérito mío.
+3. **Decisiones de diseño que yo asumo y defiendo**, aunque la IA las haya redactado.
 
 ---
 
-> **Nota para quien revisa:** las decisiones de las secciones 1, 3 y 7 son las que defenderé en la sesión. La IA aceleró la escritura de código y documentación; los criterios de elección y la validación fueron humanos.
+## Prompts clave
+
+| # | Prompt (resumido) | Para qué sirvió |
+|---|---|---|
+| 1 | Pegué el contexto de negocio, el reto A–D y los requisitos de entrega: "analiza la información y tracemos una línea para empezar". | Plan por fases y la comparación Outbox / CDC / buffer. |
+| 2 | "No te centres en lo que no te envié." | Corregir que la IA estaba especulando sobre partes del enunciado que no tenía. |
+| 3 | Errores reales pegados tal cual: instalador de Docker, `wsl --install` → 403, `pull access denied for minio/mc`, timeout contra `mcr.microsoft.com`. | Diagnóstico y corrección guiados por evidencia, no por suposiciones. |
+| 4 | "Toma el control y hazlo todo tú." | Generación del código completo y push al repositorio. |
+| 5 | Pegué la salida completa de `scripts/demo.ps1`. | Validar los resultados y documentar los límites encontrados (silver vs. bronze, `remove_orphan_files`). |
+| 6 | "Sé totalmente sincero" al responder la pregunta 4. | Esta versión del documento: la anterior exageraba el papel humano (ver la sección 4). |
+
+---
+
+## 1. Errores de la IA corregidos gracias a la ejecución real
+
+### 1.1 MinIO: una imagen que ya no existía (el caso principal)
+- **Qué hizo la IA:** usó `minio/minio` y `minio/mc` como S3 local y lo entregó como listo para usar.
+- **Qué pasó:** en la primera ejecución, `docker compose up` falló con `pull access denied for minio/mc`. MinIO había retirado sus imágenes públicas de Docker Hub y de quay.io. El conocimiento de la IA era anterior a ese cambio, y no lo verificó aunque podía hacerlo.
+- **Corrección:** se reemplazó por SeaweedFS (API S3) y el bucket se crea con la aws-cli oficial. Antes de volver a entregar, se comprobó en Docker Hub que existiera cada imagen nueva.
+- **Quién aportó qué:** el error lo destapó ejecutar el entorno de verdad. La alternativa (SeaweedFS) la propuso la IA. Mi criterio fue exigir ejecución real antes de dar algo por terminado y descartar mirrors no oficiales de MinIO.
+
+### 1.2 `wsl --install` → 403
+- **Qué hizo la IA:** dio el paso estándar, `wsl --install`.
+- **Qué pasó:** en este equipo devolvió `Prohibido (403)`.
+- **Corrección:** activar `VirtualMachinePlatform` y `Microsoft-Windows-Subsystem-Linux` con `dism.exe`, y luego `wsl --update --web-download`.
+
+### 1.3 `remove_orphan_files` presentado como parte de la solución
+- **Qué hizo la IA:** lo incluyó en el mantenimiento y en el README como si funcionara, envuelto en un `try/except` sin advertir que probablemente fallaría.
+- **Qué pasó:** en la ejecución real falló. Iceberg 1.6 lista archivos con el FileSystem de Hadoop, que no conoce `s3://` sin `hadoop-aws`.
+- **Corrección:** se documentó como límite explícito. En AWS lo cubre el optimizador de huérfanos del Glue Data Catalog.
+
+### 1.4 Descargas desde `mcr.microsoft.com`
+- **Qué pasó:** la compilación falló por timeout de red contra el registro de Microsoft.
+- **Corrección:** pre-descargar las imágenes con `docker pull`, que reintenta, y usar la misma imagen base (`aspnet:8.0`) para la API y el relay, para tener una descarga menos.
+
+### 1.5 Especular sin información
+- Al inicio, la IA pedía y daba por supuestas preguntas del enunciado que todavía no le había entregado. Le indiqué que trabajara solo con lo que tenía.
+
+---
+
+## 2. Auto-correcciones de la IA (no son mérito humano)
+
+En esta parte no intervine. Las dejo registradas por transparencia:
+
+- **Imagen de Spark:** la IA propuso primero `tabulario/spark-iceberg` y luego la cambió por una imagen propia sobre `apache/spark:3.5.3`, con jars fijadas y alineadas con Glue.
+- **dbt:** fijó dbt 1.9. Al validar con `dbt parse` vio el aviso de versión sin soporte y subió a 1.11. También corrigió la sintaxis de tests deprecada.
+- **dbt sin Thrift Server:** cambió su propia propuesta inicial (dbt contra un Thrift Server) por el modo `session`, para ahorrar RAM.
+- **Prueba de la lógica:** antes de que yo ejecutara nada, la IA probó las transformaciones de bronze, silver y gold en Spark local con datos sintéticos que incluían un duplicado y un mensaje corrupto.
+
+> Una versión anterior de este documento presentaba varios de estos puntos (y el tema de Glue) como "correcciones humanas". No lo eran: fueron decisiones o auto-revisiones de la IA. Lo corregí porque presentar como propio un criterio que no ejercí sería justamente el tipo de output de IA que hay que controlar.
+
+---
+
+## 3. Decisiones de diseño que asumo y defiendo
+
+La IA las redactó, pero las revisé y son las que voy a sostener en la sesión técnica:
+
+- **Outbox en lugar de CDC o buffer:** el requisito "sin pérdida de eventos" descarta el buffer en memoria, y el acoplamiento al esquema físico hace de CDC una segunda opción.
+- **AWS Glue en local:** el Glue Data Catalog no tiene emulador local oficial. Se usa un catálogo Iceberg REST y en AWS solo cambia `catalog-impl`.
+- **At-least-once honesto:** el relay entrega at-least-once y silver deduplica por `event_id`, en lugar de prometer exactly-once de punta a punta.
+- **Particionamiento** por `days(occurred_at)` y no por cuenta, **copy-on-write** para auditoría, y **purga por lotes de menos de 5000 filas** para evitar el escalamiento de bloqueos.
+- **Riesgo conocido:** en la PoC la purga del outbox no espera a confirmar que el evento llegó a bronze (ver la pregunta 3 del README).
+
+<!-- TODO (autora): reemplazar o complementar esta sección con tus propias palabras: qué revisaste, qué cambiarías y por qué. -->
+
+---
+
+## 4. Lección
+
+La IA aceleró muchísimo la escritura de código y documentación. Sus fallas no fueron de sintaxis sino de **contexto del mundo real**: imágenes retiradas, redes restringidas, limitaciones de una versión concreta. Ninguna se ve leyendo el código. Todas aparecieron al ejecutar. Por eso mi regla es simple: **nada sugerido por la IA cuenta como hecho hasta que corre en la máquina real**.
