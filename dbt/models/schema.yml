@@ -1,0 +1,30 @@
+version: 2
+
+models:
+  - name: audit_events
+    description: Eventos de auditoría únicos y tipados (capa silver).
+    columns:
+      - name: event_id
+        description: Clave natural del evento, generada en el core .NET.
+        data_tests:
+          - unique
+          - not_null
+      - name: occurred_at
+        data_tests:
+          - not_null
+      - name: schema_version
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [1, 2]
+                quote: false
+      - name: amount
+        data_tests:
+          - not_null
+
+  - name: daily_audit_summary
+    description: Resumen diario por tipo de evento, canal y moneda (capa gold).
+    columns:
+      - name: event_date
+        data_tests:
+          - not_null

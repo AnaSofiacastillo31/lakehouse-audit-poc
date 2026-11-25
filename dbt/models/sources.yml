@@ -1,0 +1,9 @@
+version: 2
+
+sources:
+  - name: bronze
+    schema: bronze
+    description: Copia inmutable de los eventos publicados por el outbox del core .NET.
+    tables:
+      - name: audit_events
+        description: Append-only, particionada por days(occurred_at). Puede contener duplicados (at-least-once).

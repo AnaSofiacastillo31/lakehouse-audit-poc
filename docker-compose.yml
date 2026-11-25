@@ -1,0 +1,283 @@
+# ------------------------------------------------------------------------------------------
+# PoC: ciclo de vida de auditoría  .NET 8 / SQL Server  ->  Outbox  ->  Redpanda  ->  Spark
+#      ->  Apache Iceberg (MinIO + catálogo REST, sustituto local de S3 + Glue)  ->  dbt
+#
+#   docker compose up -d --build                 # flujo continuo (core, relay, ingesta)
+#   docker compose run --rm dbt build            # silver + gold + tests
+#   docker compose run --rm spark-maintenance    # compactación / expiración de snapshots
+#   docker compose run --rm spark-sql -f /opt/jobs/verify.sql
+#
+# Presupuesto de memoria pensado para un equipo de 16 GB (WSL 2 limitado a 10 GB).
+# ------------------------------------------------------------------------------------------
+name: lakehouse-audit
+
+x-aws-env: &aws-env
+  AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-admin}
+  AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-password}
+  AWS_REGION: us-east-1
+
+x-core-connection: &core-connection
+  ConnectionStrings__Core: "Server=sqlserver,1433;Database=AuditCore;User Id=sa;Password=${MSSQL_SA_PASSWORD:-Poc_Audit#2026};TrustServerCertificate=True;Encrypt=False"
+
+services:
+
+  # ====================== CORE TRANSACCIONAL (.NET 8 + SQL Server) ======================
+
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: sqlserver
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_PID: Developer
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD:-Poc_Audit#2026}
+      MSSQL_MEMORY_LIMIT_MB: 2048
+    ports:
+      - "1433:1433"
+    volumes:
+      - sqlserver-data:/var/opt/mssql
+    mem_limit: 2560m
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -C -Q 'SELECT 1' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    networks: [lakehouse]
+
+  # API de negocio: escribe la transferencia y el evento de auditoría en la MISMA transacción (outbox)
+  audit-api:
+    build: ./src/Audit.Api
+    container_name: audit-api
+    environment:
+      <<: *core-connection
+    ports:
+      - "8081:8080"
+    depends_on:
+      sqlserver:
+        condition: service_healthy
+    mem_limit: 512m
+    restart: unless-stopped
+    networks: [lakehouse]
+
+  # Relay del outbox: publica a Redpanda (at-least-once) y purga lo publicado por lotes
+  outbox-relay:
+    build: ./src/Audit.OutboxRelay
+    container_name: outbox-relay
+    environment:
+      <<: *core-connection
+      Kafka__BootstrapServers: redpanda:9092
+      Kafka__Topic: audit.events
+      Outbox__BatchSize: "500"
+      Outbox__PollIntervalMs: "1000"
+      Retention__PublishedRetentionMinutes: "10"
+      Retention__DeleteBatchSize: "4000"
+      Retention__IntervalSeconds: "60"
+    depends_on:
+      audit-api:
+        condition: service_started
+      redpanda-init:
+        condition: service_completed_successfully
+    mem_limit: 384m
+    restart: unless-stopped
+    networks: [lakehouse]
+
+  # Tráfico de ejemplo: 30 rondas de 100 transferencias (una cada 10 s)
+  load-generator:
+    image: curlimages/curl:8.11.1
+    container_name: load-generator
+    depends_on:
+      - audit-api
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo "Esperando a la API..."
+        until curl -sf http://audit-api:8080/health > /dev/null; do sleep 3; done
+        for i in $$(seq 1 30); do
+          echo "Ronda $$i: $$(curl -s -X POST 'http://audit-api:8080/api/simulate?count=100')"
+          sleep 10
+        done
+        echo "Carga terminada. Estado del outbox: $$(curl -s http://audit-api:8080/api/outbox/stats)"
+    restart: "no"
+    networks: [lakehouse]
+
+  # ====================== BUS DE EVENTOS (Redpanda, API Kafka) ======================
+
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.2.7
+    container_name: redpanda
+    command:
+      - redpanda
+      - start
+      - --mode=dev-container
+      - --smp=1
+      - --memory=512M
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr=internal://redpanda:9092,external://localhost:19092
+    ports:
+      - "19092:19092"
+    volumes:
+      - redpanda-data:/var/lib/redpanda/data
+    mem_limit: 1g
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -E 'Healthy:.+true' || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    networks: [lakehouse]
+
+  redpanda-init:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.2.7
+    container_name: redpanda-init
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        rpk topic create audit.events -p 3 -r 1 -c retention.ms=604800000 -X brokers=redpanda:9092 || true
+        rpk topic list -X brokers=redpanda:9092
+    restart: "no"
+    networks: [lakehouse]
+
+  # ====================== LAKEHOUSE (MinIO = S3, Iceberg REST = Glue Data Catalog) ======================
+
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-admin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-password}
+      MINIO_DOMAIN: minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    networks:
+      lakehouse:
+        aliases:
+          - warehouse.minio
+
+  minio-init:
+    image: minio/mc:latest
+    container_name: minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-admin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-password}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD"
+        mc mb --ignore-existing local/warehouse
+        echo "Bucket warehouse listo"
+    restart: "no"
+    networks: [lakehouse]
+
+  rest:
+    image: apache/iceberg-rest-fixture:latest
+    container_name: iceberg-rest
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      <<: *aws-env
+      CATALOG_WAREHOUSE: s3://warehouse/
+      CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO
+      CATALOG_S3_ENDPOINT: http://minio:9000
+      CATALOG_S3_PATH__STYLE__ACCESS: "true"
+      # Metadatos del catálogo en SQLite sobre un volumen (persisten entre reinicios)
+      CATALOG_URI: jdbc:sqlite:file:/tmp/iceberg_catalog.db
+    ports:
+      - "8181:8181"
+    volumes:
+      - iceberg-catalog:/tmp
+    mem_limit: 512m
+    networks: [lakehouse]
+
+  # ====================== PROCESAMIENTO (Spark 3.5 + Iceberg 1.6, misma base que AWS Glue) ======================
+
+  # Ingesta continua Redpanda -> bronze (Iceberg), micro-batches cada 30 s
+  spark-ingest:
+    build: ./spark
+    image: lakehouse-audit/spark:3.5.3
+    container_name: spark-ingest
+    command: ["/opt/spark/bin/spark-submit", "/opt/jobs/ingest_bronze.py"]
+    environment:
+      <<: *aws-env
+      KAFKA_BOOTSTRAP: redpanda:9092
+      KAFKA_TOPIC: audit.events
+      TRIGGER_INTERVAL: 30 seconds
+    volumes:
+      - ./spark/jobs:/opt/jobs:ro
+      - spark-checkpoints:/opt/checkpoints
+    ports:
+      - "4040:4040"   # Spark UI del streaming
+    depends_on:
+      rest:
+        condition: service_started
+      redpanda-init:
+        condition: service_completed_successfully
+    mem_limit: 2g
+    restart: on-failure
+    networks: [lakehouse]
+
+  # --- Jobs bajo demanda (perfil "jobs": no arrancan con `up`, se lanzan con `docker compose run`) ---
+
+  dbt:
+    image: lakehouse-audit/spark:3.5.3
+    profiles: ["jobs"]
+    working_dir: /opt/dbt
+    entrypoint: ["dbt"]
+    command: ["build"]
+    environment:
+      <<: *aws-env
+      DBT_PROFILES_DIR: /opt/dbt
+    volumes:
+      - ./dbt:/opt/dbt
+    mem_limit: 2g
+    networks: [lakehouse]
+
+  spark-maintenance:
+    image: lakehouse-audit/spark:3.5.3
+    profiles: ["jobs"]
+    command: ["/opt/spark/bin/spark-submit", "/opt/jobs/maintenance.py"]
+    environment:
+      <<: *aws-env
+      MAINTENANCE_TABLES: bronze.audit_events,silver.audit_events
+      SNAPSHOT_RETENTION_MINUTES: "10"
+    volumes:
+      - ./spark/jobs:/opt/jobs:ro
+    mem_limit: 2g
+    networks: [lakehouse]
+
+  spark-sql:
+    image: lakehouse-audit/spark:3.5.3
+    profiles: ["jobs"]
+    entrypoint: ["/opt/spark/bin/spark-sql"]
+    environment:
+      <<: *aws-env
+    volumes:
+      - ./spark/jobs:/opt/jobs:ro
+    mem_limit: 2g
+    networks: [lakehouse]
+
+volumes:
+  sqlserver-data:
+  redpanda-data:
+  minio-data:
+  iceberg-catalog:
+  spark-checkpoints:
+
+networks:
+  lakehouse:
+    name: lakehouse

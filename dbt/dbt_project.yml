@@ -1,0 +1,17 @@
+name: lakehouse_audit
+version: "1.0.0"
+config-version: 2
+profile: lakehouse
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+target-path: "target"
+clean-targets: ["target", "dbt_packages"]
+
+models:
+  lakehouse_audit:
+    +file_format: iceberg
+    silver:
+      +schema: silver
+    gold:
+      +schema: gold

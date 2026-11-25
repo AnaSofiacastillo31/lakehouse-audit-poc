@@ -1,0 +1,11 @@
+# Local: dbt-spark en modo "session" (PySpark dentro del contenedor, catálogo Iceberg REST).
+# En AWS: adaptador dbt-glue (type: glue) con datalake_formats: iceberg sobre el Glue Data Catalog.
+lakehouse:
+  target: local
+  outputs:
+    local:
+      type: spark
+      method: session
+      host: NA
+      schema: silver
+      threads: 1
