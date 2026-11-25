@@ -53,14 +53,22 @@ El presupuesto de 16 GB de RAM condicionó todo el diseño del compose: límites
 - La sintaxis de tests generada (`accepted_values` con argumentos sueltos) disparaba una advertencia de deprecación en 1.11. Se corrigió a `data_tests` con `arguments:`.
 - La IA propuso dbt contra un Spark Thrift Server. Se cambió al modo `session`, que no necesita un servicio permanente y ahorra unos 2 GB de RAM.
 
-## 6. Verificaciones hechas (sin confiar solo en la IA)
+## 6. Una dependencia que desapareció: MinIO
+
+**Qué pasó:** la IA propuso MinIO como sustituto local de S3, la opción "de manual". En la primera ejecución real, `docker compose up` falló con `pull access denied for minio/mc`: MinIO había retirado sus imágenes públicas de Docker Hub y de quay.io en 2026. La IA no lo anticipó porque su conocimiento base era anterior a ese cambio.
+
+**Decisión:** no depender de mirrors no oficiales. Se reemplazó por **SeaweedFS** (API S3, Apache 2.0) y el bucket se crea con la **aws-cli oficial**, de modo que la PoC solo depende del protocolo S3 y no de un proveedor concreto. Antes de cambiar, se verificó que cada imagen nueva existe en Docker Hub.
+
+**Lección:** en infraestructura, toda sugerencia de la IA sobre imágenes o versiones se valida contra el registro real antes de darla por buena.
+
+## 7. Verificaciones hechas (sin confiar solo en la IA)
 
 - `docker compose config` para validar la sintaxis del compose.
 - `dbt parse` y `dbt ls`: el proyecto compila (2 modelos, 6 tests, 1 source).
 - La lógica de bronze (parseo del envelope, cuarentena de mensajes malformados) y de silver/gold (deduplicación por `event_id`, coexistencia v1/v2) se probó en Spark local con datos sintéticos que incluían un duplicado y un mensaje corrupto.
 - La compilación .NET y el flujo completo se validan con `docker compose up --build` en la máquina local.
 
-## 7. Puntos donde se exigió precisión técnica
+## 8. Puntos donde se exigió precisión técnica
 
 - **Lock escalation:** la purga se hace en lotes de **menos de 5000 filas**, el umbral de escalamiento de bloqueos de SQL Server.
 - **Particionamiento:** se rechazó particionar por cuenta (alta cardinalidad, más archivos pequeños). Se usó `days(occurred_at)` con hidden partitioning.

@@ -1,6 +1,6 @@
 # ------------------------------------------------------------------------------------------
 # PoC: ciclo de vida de auditoría  .NET 8 / SQL Server  ->  Outbox  ->  Redpanda  ->  Spark
-#      ->  Apache Iceberg (MinIO + catálogo REST, sustituto local de S3 + Glue)  ->  dbt
+#      ->  Apache Iceberg (SeaweedFS S3 + catálogo REST, sustituto local de S3 + Glue)  ->  dbt
 #
 #   docker compose up -d --build                 # flujo continuo (core, relay, ingesta)
 #   docker compose run --rm dbt build            # silver + gold + tests
@@ -12,8 +12,8 @@
 name: lakehouse-audit
 
 x-aws-env: &aws-env
-  AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-admin}
-  AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-password}
+  AWS_ACCESS_KEY_ID: admin          # deben coincidir con infra/seaweedfs/s3.json
+  AWS_SECRET_ACCESS_KEY: password
   AWS_REGION: us-east-1
 
 x-core-connection: &core-connection
@@ -103,7 +103,7 @@ services:
   # ====================== BUS DE EVENTOS (Redpanda, API Kafka) ======================
 
   redpanda:
-    image: docker.redpanda.com/redpandadata/redpanda:v24.2.7
+    image: redpandadata/redpanda:v24.2.7
     container_name: redpanda
     command:
       - redpanda
@@ -126,7 +126,7 @@ services:
     networks: [lakehouse]
 
   redpanda-init:
-    image: docker.redpanda.com/redpandadata/redpanda:v24.2.7
+    image: redpandadata/redpanda:v24.2.7
     container_name: redpanda-init
     depends_on:
       redpanda:
@@ -139,47 +139,46 @@ services:
     restart: "no"
     networks: [lakehouse]
 
-  # ====================== LAKEHOUSE (MinIO = S3, Iceberg REST = Glue Data Catalog) ======================
+  # ====================== LAKEHOUSE (SeaweedFS = S3, Iceberg REST = Glue Data Catalog) ======================
 
-  minio:
-    image: minio/minio:latest
-    container_name: minio
-    command: ["server", "/data", "--console-address", ":9001"]
-    environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-admin}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-password}
-      MINIO_DOMAIN: minio
+  # SeaweedFS: object storage compatible con S3 (sustituye a MinIO, que retiró sus imágenes públicas)
+  seaweedfs:
+    image: chrislusf/seaweedfs:latest
+    container_name: seaweedfs
+    entrypoint: ["/usr/bin/weed"]
+    command:
+      - server
+      - -dir=/data
+      - -ip=seaweedfs
+      - -ip.bind=0.0.0.0
+      - -master.volumeSizeLimitMB=1024
+      - -volume.max=0
+      - -s3
+      - -s3.port=8333
+      - -s3.config=/etc/seaweedfs/s3.json
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "8333:8333"   # API S3
+      - "8888:8888"   # Explorador web de archivos (filer)
     volumes:
-      - minio-data:/data
+      - seaweedfs-data:/data
+      - ./infra/seaweedfs/s3.json:/etc/seaweedfs/s3.json:ro
     mem_limit: 512m
-    healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
-      interval: 5s
-      timeout: 5s
-      retries: 30
-    networks:
-      lakehouse:
-        aliases:
-          - warehouse.minio
+    networks: [lakehouse]
 
-  minio-init:
-    image: minio/mc:latest
-    container_name: minio-init
+  # Crea el bucket del warehouse con la CLI estándar de AWS (funciona contra cualquier S3)
+  s3-init:
+    image: amazon/aws-cli:2.38.3
+    container_name: s3-init
     depends_on:
-      minio:
-        condition: service_healthy
+      - seaweedfs
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-admin}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-password}
+      <<: *aws-env
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
-        mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD"
-        mc mb --ignore-existing local/warehouse
-        echo "Bucket warehouse listo"
+        until aws --endpoint-url http://seaweedfs:8333 s3 ls > /dev/null 2>&1; do echo "Esperando S3..."; sleep 3; done
+        aws --endpoint-url http://seaweedfs:8333 s3 mb s3://warehouse || true
+        aws --endpoint-url http://seaweedfs:8333 s3 ls
     restart: "no"
     networks: [lakehouse]
 
@@ -187,13 +186,13 @@ services:
     image: apache/iceberg-rest-fixture:latest
     container_name: iceberg-rest
     depends_on:
-      minio-init:
+      s3-init:
         condition: service_completed_successfully
     environment:
       <<: *aws-env
       CATALOG_WAREHOUSE: s3://warehouse/
       CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO
-      CATALOG_S3_ENDPOINT: http://minio:9000
+      CATALOG_S3_ENDPOINT: http://seaweedfs:8333
       CATALOG_S3_PATH__STYLE__ACCESS: "true"
       # Metadatos del catálogo en SQLite sobre un volumen (persisten entre reinicios)
       CATALOG_URI: jdbc:sqlite:file:/tmp/iceberg_catalog.db
@@ -274,7 +273,7 @@ services:
 volumes:
   sqlserver-data:
   redpanda-data:
-  minio-data:
+  seaweedfs-data:
   iceberg-catalog:
   spark-checkpoints:
 

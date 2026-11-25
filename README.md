@@ -19,7 +19,7 @@ flowchart LR
     end
     RELAY -->|"at-least-once<br/>productor idempotente"| RP[["Redpanda<br/>topic audit.events"]]
     RP --> ING["Spark Structured Streaming<br/>ingest_bronze.py"]
-    subgraph LH["Lakehouse (MinIO = S3, Iceberg REST = Glue Data Catalog)"]
+    subgraph LH["Lakehouse (SeaweedFS = S3, Iceberg REST = Glue Data Catalog)"]
         ING -->|"exactly-once<br/>micro-batch 30 s"| BR[("bronze.audit_events<br/>append-only")]
         BR -->|"dbt MERGE por event_id"| SI[("silver.audit_events<br/>única y tipada")]
         SI -->|dbt| GO[("gold.daily_audit_summary")]
@@ -32,7 +32,7 @@ flowchart LR
 |---|---|---|
 | Core transaccional | .NET 8 + SQL Server 2022 (contenedor) | ECS/EKS + RDS SQL Server |
 | Bus de eventos | Redpanda (API Kafka) | Amazon MSK |
-| Object storage | MinIO | Amazon S3 |
+| Object storage | SeaweedFS (API S3) | Amazon S3 |
 | Catálogo de tablas | Iceberg REST catalog | **AWS Glue Data Catalog** |
 | Procesamiento | Spark 3.5 + Iceberg 1.6 | **AWS Glue 4.0/5.0** (Spark 3.5) |
 | Transformación | dbt-spark (modo session) | dbt-glue |
@@ -55,7 +55,7 @@ El script levanta todo, genera tráfico, ejecuta dbt y el mantenimiento, y muest
 ### Paso a paso
 
 ```bash
-# 1. Levantar el flujo continuo: SQL Server, API, relay, Redpanda, MinIO, catálogo e ingesta Spark
+# 1. Levantar el flujo continuo: SQL Server, API, relay, Redpanda, SeaweedFS (S3), catálogo e ingesta Spark
 docker compose up -d --build
 
 # 2. (Opcional) más tráfico; el servicio load-generator ya envía 100 transferencias cada 10 s
@@ -77,7 +77,8 @@ docker compose run --rm spark-sql -f /opt/jobs/verify.sql
 | API de negocio | http://localhost:8081 | – |
 | SQL Server | `localhost,1433` | `sa` / `Poc_Audit#2026` |
 | Redpanda (Kafka) | `localhost:19092` | – |
-| Consola MinIO | http://localhost:9001 | `admin` / `password` |
+| S3 (SeaweedFS) | http://localhost:8333 | `admin` / `password` |
+| Explorador de archivos S3 | http://localhost:8888/buckets/warehouse/ | – |
 | Catálogo Iceberg REST | http://localhost:8181 | – |
 | Spark UI (ingesta) | http://localhost:4040 | – |
 
@@ -193,11 +194,12 @@ Cómo validar que funciona:
    - gold está poblado
    - el historial de snapshots muestra los commits del streaming y de la compactación
 3. `spark-maintenance`: el número de archivos de bronze baja tras la compactación.
-4. Consola MinIO: carpetas `data/` (Parquet) y `metadata/` (JSON y Avro de Iceberg) en `warehouse/`.
+4. Explorador de SeaweedFS (http://localhost:8888/buckets/warehouse/): carpetas `data/` (Parquet) y `metadata/` (JSON y Avro de Iceberg) de cada tabla.
 
 ### Decisiones de la PoC y sus límites
 
 - **Glue Data Catalog no tiene emulador local oficial.** Se usa el catálogo Iceberg REST, y en AWS solo cambia la configuración del catálogo en [`spark/conf/spark-defaults.conf`](spark/conf/spark-defaults.conf) (`catalog-impl=GlueCatalog`). Los jobs y los modelos dbt no cambian.
+- **SeaweedFS en lugar de MinIO.** MinIO retiró sus imágenes públicas de Docker Hub y de quay.io en 2026. SeaweedFS ofrece la misma API S3 (Apache 2.0), y el bucket se crea con la `aws-cli` oficial, así que el código no depende del proveedor: en AWS es S3 directamente.
 - **Imagen Spark propia** (Spark 3.5.3 + Iceberg 1.6.1, la misma línea que Glue 4.0/5.0) en lugar de imágenes de terceros, para tener control de versiones.
 - **dbt en modo `session`:** evita mantener un Thrift Server levantado y ahorra unos 2 GB de RAM. En AWS se usaría `dbt-glue`.
 - **Fuera del alcance de la PoC:** autenticación, TLS, secretos (se usan valores por defecto locales), alta disponibilidad, orquestación con Airflow o Step Functions, y migraciones versionadas (`DatabaseInitializer` es idempotente pero simple).

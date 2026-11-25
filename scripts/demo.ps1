@@ -1,4 +1,4 @@
-# Demo end-to-end en Windows (PowerShell). Ejecutar desde la raíz del repo:
+﻿# Demo end-to-end en Windows (PowerShell). Ejecutar desde la raíz del repo:
 #   powershell -ExecutionPolicy Bypass -File .\scripts\demo.ps1
 $ErrorActionPreference = "Stop"
 Set-Location (Join-Path $PSScriptRoot "..")
@@ -31,4 +31,4 @@ docker compose run --rm spark-maintenance
 Step "6/6 Verificación"
 docker compose run --rm spark-sql -f /opt/jobs/verify.sql
 
-Write-Host "`nListo. Consola MinIO: http://localhost:9001 (admin / password)  |  Spark UI: http://localhost:4040" -ForegroundColor Green
+Write-Host "`nListo. Archivos S3 (SeaweedFS): http://localhost:8888/buckets/warehouse/  |  Spark UI: http://localhost:4040" -ForegroundColor Green
