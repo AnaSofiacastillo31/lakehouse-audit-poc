@@ -66,7 +66,8 @@ El presupuesto de 16 GB de RAM condicionó todo el diseño del compose: límites
 - `docker compose config` para validar la sintaxis del compose.
 - `dbt parse` y `dbt ls`: el proyecto compila (2 modelos, 6 tests, 1 source).
 - La lógica de bronze (parseo del envelope, cuarentena de mensajes malformados) y de silver/gold (deduplicación por `event_id`, coexistencia v1/v2) se probó en Spark local con datos sintéticos que incluían un duplicado y un mensaje corrupto.
-- La compilación .NET y el flujo completo se validan con `docker compose up --build` en la máquina local.
+- **Ejecución end-to-end real** en Windows con `scripts/demo.ps1`: la API y el relay compilaron y corrieron, el streaming llenó bronze, dbt pasó sus tests y la compactación quedó registrada como snapshots `replace`. Los números están en el README (sección D).
+- La IA no anticipó dos problemas que aparecieron recién al ejecutar: `remove_orphan_files` no funciona con `s3://` en Iceberg 1.6 sin `hadoop-aws`, y la descarga desde `mcr.microsoft.com` se agotaba en esta red. Se documentó el primero como límite consciente y el segundo se resolvió descargando las imágenes por adelantado con `docker pull` (más una imagen base menos).
 
 ## 8. Puntos donde se exigió precisión técnica
 

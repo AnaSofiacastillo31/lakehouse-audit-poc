@@ -86,7 +86,11 @@ def main() -> None:
                 )
             """).show(truncate=False)
         except Exception as exc:  # depende del FileIO/FS disponible; no debe tumbar el resto del mantenimiento
-            print(f"[maintenance] {table}: remove_orphan_files omitido ({str(exc).splitlines()[0]})")
+            # Iceberg 1.6 lista huérfanos con el FileSystem de Hadoop, que no conoce el esquema s3:// sin hadoop-aws.
+            # En AWS lo resuelve el optimizador de huérfanos del Glue Data Catalog (o hadoop-aws/S3A en el job).
+            lines = [line for line in str(exc).splitlines() if "Exception" in line]
+            reason = lines[0].strip() if lines else str(exc).splitlines()[0]
+            print(f"[maintenance] {table}: remove_orphan_files omitido -> {reason[:200]}")
 
         after = file_stats(spark, table)
         print(f"[maintenance] {table} DESPUÉS -> {after}")

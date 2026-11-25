@@ -196,12 +196,31 @@ Cómo validar que funciona:
 3. `spark-maintenance`: el número de archivos de bronze baja tras la compactación.
 4. Explorador de SeaweedFS (http://localhost:8888/buckets/warehouse/): carpetas `data/` (Parquet) y `metadata/` (JSON y Avro de Iceberg) de cada tabla.
 
+### Resultados de una ejecución real (Windows, 16 GB de RAM)
+
+Salida de `scripts/demo.ps1` el 25/11/2026:
+
+| Verificación | Resultado |
+|---|---|
+| Eventos en bronze | 1 900 |
+| Duplicados por `event_id` en bronze | 0 |
+| Eventos únicos en silver (en ese momento) | 1 300 |
+| Evolución de esquema en silver | v1 `NOT_CAPTURED`: 489 · v2 `API` 215, `BRANCH` 167, `MOBILE` 203, `WEB` 226 |
+| Gold | 10 filas (fecha × canal × moneda) |
+| Snapshots de bronze | `append` cada 30 s (streaming) más 2 `replace` (compactación) |
+| Compactación de silver | 1 archivo de 73 KB, 1 snapshot tras expirar |
+
+**Cómo leer estos números:**
+- **Silver tiene menos eventos que bronze, y es lo esperado.** dbt es incremental y por lotes: procesó lo que había en bronze cuando se ejecutó, mientras el streaming siguió agregando micro-batches. Al volver a ejecutar `docker compose run --rm dbt build`, silver se pone al día. Esa latencia es la frontera entre la ingesta continua y la transformación programada.
+- **La compactación convive con el streaming.** Los snapshots `replace` aparecen intercalados con los `append`, sin conflictos. Es la concurrencia optimista de Iceberg funcionando.
+
 ### Decisiones de la PoC y sus límites
 
 - **Glue Data Catalog no tiene emulador local oficial.** Se usa el catálogo Iceberg REST, y en AWS solo cambia la configuración del catálogo en [`spark/conf/spark-defaults.conf`](spark/conf/spark-defaults.conf) (`catalog-impl=GlueCatalog`). Los jobs y los modelos dbt no cambian.
 - **SeaweedFS en lugar de MinIO.** MinIO retiró sus imágenes públicas de Docker Hub y de quay.io en 2026. SeaweedFS ofrece la misma API S3 (Apache 2.0), y el bucket se crea con la `aws-cli` oficial, así que el código no depende del proveedor: en AWS es S3 directamente.
 - **Imagen Spark propia** (Spark 3.5.3 + Iceberg 1.6.1, la misma línea que Glue 4.0/5.0) en lugar de imágenes de terceros, para tener control de versiones.
 - **dbt en modo `session`:** evita mantener un Thrift Server levantado y ahorra unos 2 GB de RAM. En AWS se usaría `dbt-glue`.
+- **`remove_orphan_files` se omite en local.** En Iceberg 1.6 este procedimiento lista archivos con el FileSystem de Hadoop, que no reconoce `s3://` sin el conector `hadoop-aws` (unos 280 MB de jars). Se dejó fuera para mantener la imagen liviana, y el job lo registra sin detener el resto del mantenimiento. En AWS lo cubre el optimizador de archivos huérfanos del Glue Data Catalog.
 - **Fuera del alcance de la PoC:** autenticación, TLS, secretos (se usan valores por defecto locales), alta disponibilidad, orquestación con Airflow o Step Functions, y migraciones versionadas (`DatabaseInitializer` es idempotente pero simple).
 
 ---
