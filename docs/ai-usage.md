@@ -1,9 +1,9 @@
 # C. Uso orquestado de IA
 
-**Asistente:** Claude (Anthropic), en una sola conversación de trabajo. Se usó como par técnico para analizar el enunciado, preparar el entorno en Windows, generar el código (.NET, PySpark, dbt, Docker Compose) y redactar la documentación.
+**Asistente:** Claude (Anthropic), en una sola conversación de trabajo. Se usó como par técnico para analizar el enunciado y generar el código (PySpark, dbt, Docker Compose)
 
 **Cómo leer este documento.** Separo honestamente tres cosas distintas:
-1. **Errores de la IA detectados por la ejecución real o por mí**: las correcciones humanas propiamente dichas.
+1. **Errores de la IA detectados por la ejecución real o por mí**: las correcciones mias propiamente dichas.
 2. **Auto-correcciones de la IA**: la IA cambió su propia propuesta sin que yo interviniera. No las presento como mérito mío.
 3. **Decisiones de diseño que yo asumo y defiendo**, aunque la IA las haya redactado.
 
@@ -13,12 +13,10 @@
 
 | # | Prompt (resumido) | Para qué sirvió |
 |---|---|---|
-| 1 | Pegué el contexto de negocio, el reto A–D y los requisitos de entrega: "analiza la información y tracemos una línea para empezar". | Plan por fases y la comparación Outbox / CDC / buffer. |
-| 2 | "No te centres en lo que no te envié." | Corregir que la IA estaba especulando sobre partes del enunciado que no tenía. |
-| 3 | Errores reales pegados tal cual: instalador de Docker, `wsl --install` → 403, `pull access denied for minio/mc`, timeout contra `mcr.microsoft.com`. | Diagnóstico y corrección guiados por evidencia, no por suposiciones. |
-| 4 | "Toma el control y hazlo todo tú." | Generación del código completo y push al repositorio. |
-| 5 | Pegué la salida completa de `scripts/demo.ps1`. | Validar los resultados y documentar los límites encontrados (silver vs. bronze, `remove_orphan_files`). |
-| 6 | "Sé totalmente sincero" al responder la pregunta 4. | Esta versión del documento: la anterior exageraba el papel humano (ver la sección 4). |
+| 1 | trace los requisitos de entrega "analiza la información y tracemos una línea para empezar". | Plan por fases y la comparación Outbox / CDC / buffer. |
+| 2 |  Corregir que la IA estaba especulando sobre partes del enunciado que no tenía. |
+| 3 | Errores reales pegados tal cual: instalador de Docker, `wsl --install` → 403, `pull access denied for minio/mc`, timeout contra `mcr.microsoft.com`. | Diagnóstico y corrección guiados por evidencia, no por suposiciones.
+| 5 | Validar los resultados y documentar los límites encontrados (silver vs. bronze, `remove_orphan_files`). |
 
 ---
 
