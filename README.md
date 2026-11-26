@@ -41,20 +41,29 @@ flowchart LR
 
 ## Cómo levantarlo
 
-**Requisitos:** Docker Desktop con WSL 2 y al menos 10 GB de RAM asignados.
+**Requisitos:** Git y Docker Desktop (con WSL 2 en Windows), con al menos 10 GB de RAM asignados a Docker.
 
-**Opción rápida (Windows):**
+**1. Obtener el código:**
+```bash
+git clone https://github.com/AnaSofiacastillo31/lakehouse-audit-poc.git
+cd lakehouse-audit-poc
+```
+
+**2a. Opción rápida (Windows, PowerShell):** ejecuta toda la demo de punta a punta.
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\demo.ps1
 ```
 
-**Paso a paso:**
+**2b. Paso a paso (Windows, Linux o Mac):**
 ```bash
-docker compose up -d --build                           # levanta todo el flujo
-docker compose run --rm dbt build                      # crea silver y gold, y corre los tests
-docker compose run --rm spark-maintenance              # compactación
-docker compose run --rm spark-sql -f /opt/jobs/verify.sql   # verificación
+docker compose up -d --build                                 # levanta todo el flujo
+# esperar 2-3 minutos: Spark debe crear la tabla bronze y escribir los primeros lotes
+docker compose run --rm dbt build                            # crea silver y gold, y corre los tests
+docker compose run --rm spark-maintenance                    # compactación
+docker compose run --rm spark-sql -f /opt/jobs/verify.sql    # verificación
 ```
+
+> La primera ejecución descarga unos 4 GB de imágenes y puede tardar varios minutos. Los puertos 1433, 4040, 8081, 8181, 8333, 8888 y 19092 deben estar libres.
 
 | Servicio | Dirección | Credenciales |
 |---|---|---|
