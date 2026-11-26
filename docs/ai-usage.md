@@ -16,7 +16,7 @@
 | 1 | trace los requisitos de entrega "analiza la información y tracemos una línea para empezar". | Plan por fases y la comparación Outbox / CDC / buffer. |
 | 2 |  Corregir que la IA estaba especulando sobre partes del enunciado que no tenía. |
 | 3 | Errores reales pegados tal cual: instalador de Docker, `wsl --install` → 403, `pull access denied for minio/mc`, timeout contra `mcr.microsoft.com`. | Diagnóstico y corrección guiados por evidencia, no por suposiciones.
-| 5 | Validar los resultados y documentar los límites encontrados (silver vs. bronze, `remove_orphan_files`). |
+| 4 | Validar los resultados y documentar los límites encontrados (silver vs. bronze, `remove_orphan_files`). |
 
 ---
 
