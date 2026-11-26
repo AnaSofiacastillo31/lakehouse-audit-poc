@@ -13,7 +13,7 @@ x-core-connection: &core-connection
 
 services:
 
-  # ====================== CORE TRANSACCIONL (.NET 8 + SQL Server) ======================
+  # ====================== CORE TRANSACCIONAL (.NET 8 + SQL Server) ======================
 
   sqlserver:
     image: mcr.microsoft.com/mssql/server:2022-latest
