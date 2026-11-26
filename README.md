@@ -106,9 +106,31 @@ Código: [`TransferService.cs`](src/Audit.Api/Domain/TransferService.cs) · [`Ou
 
 ---
 
-## C. Uso de IA
+## C. Uso orquestado de IA
 
-Ver [`docs/ai-usage.md`](docs/ai-usage.md).
+Usé **Claude** (Anthropic) como par técnico para analizar el enunciado y generar el código (.NET, PySpark, dbt y Docker Compose). Mi papel fue dirigir, ejecutar y validar cada paso en mi máquina.
+
+**Prompts clave**
+
+| Prompt (resumido) | Para qué sirvió |
+|---|---|
+| "Analiza la información y tracemos una línea para empezar" (con el enunciado completo) | Plan por fases y comparación outbox / CDC / buffer |
+| "No te centres en lo que no te envié" | Frenar a la IA, que especulaba sobre partes del enunciado que no tenía |
+| Errores reales pegados tal cual (instalación, Docker, red) | Corregir con evidencia, no con suposiciones |
+| Salida completa de la demo | Validar resultados y documentar los límites |
+
+**Dónde la IA se equivocó y cómo se corrigió**
+
+| Error de la IA | Qué pasó | Corrección |
+|---|---|---|
+| Usó **MinIO** como S3 local sin verificarlo | `pull access denied`: MinIO retiró sus imágenes públicas | Cambio a SeaweedFS (API S3) y verificación de cada imagen en Docker Hub |
+| Indicó `wsl --install` como paso estándar | Devolvió 403 en este equipo | Activar las características de Windows con `dism` y usar `wsl --update --web-download` |
+| Dio por hecho que las imágenes de Microsoft descargarían bien | Timeout de red contra `mcr.microsoft.com` | Pre-descargar con `docker pull` y usar una imagen base menos |
+| Especuló sobre el enunciado | Suponía información que no tenía | Se le pidió trabajar solo con lo entregado |
+
+**Decisiones que asumo y defiendo:** outbox en lugar de CDC o buffer, catálogo REST como sustituto local de Glue, particionamiento por día y purga por lotes de menos de 5000 filas.
+
+**Regla:** nada de lo que sugiere la IA cuenta como hecho hasta que corre en la máquina real.
 
 ---
 
@@ -142,8 +164,7 @@ En esa ejecución silver tenía menos eventos que bronze (1 300 vs. 1 900). Es l
 ├── src/Audit.OutboxRelay/   # publica a Kafka y purga SQL Server
 ├── spark/jobs/              # ingesta, mantenimiento y verificación
 ├── dbt/models/              # silver, gold y tests
-├── scripts/demo.ps1         # demo en Windows
-└── docs/ai-usage.md         # uso de IA
+└── scripts/demo.ps1         # demo en Windows
 ```
 
 ---
@@ -212,4 +233,4 @@ La IA configuró **MinIO** como S3 local y lo dio por listo. Al ejecutarlo, fall
 
 **Corrección:** no usar mirrors no oficiales. Se cambió a **SeaweedFS** (API S3 estándar) y se verificó cada imagen en Docker Hub antes de usarla.
 
-**Regla adoptada:** nada de lo que sugiere la IA cuenta como hecho hasta que corre en la máquina real. Más detalle en [`docs/ai-usage.md`](docs/ai-usage.md).
+**Regla adoptada:** nada de lo que sugiere la IA cuenta como hecho hasta que corre en la máquina real. Las demás correcciones están en la sección C.
