@@ -133,7 +133,7 @@ services:
 
   # ====================== LAKEHOUSE (SeaweedFS = S3, Iceberg REST = Glue Data Catalog) ======================
 
-  # SeaweedFS: object storage compatible con S3 (sustituye a MinIO, que retiró sus imágenes públicas)
+  # SeaweedFS: object storage compatible con S3 (sustituye a MinIO)
   seaweedfs:
     image: chrislusf/seaweedfs:latest
     container_name: seaweedfs
@@ -157,7 +157,7 @@ services:
     mem_limit: 512m
     networks: [lakehouse]
 
-  # Crea el bucket del warehouse con la CLI estándar de AWS (funciona contra cualquier S3)
+  # Crea el bucket del warehouse con la CLI estándar de AWS
   s3-init:
     image: amazon/aws-cli:2.38.3
     container_name: s3-init
