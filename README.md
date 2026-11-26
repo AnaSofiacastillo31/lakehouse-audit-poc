@@ -108,15 +108,15 @@ Código: [`TransferService.cs`](src/Audit.Api/Domain/TransferService.cs) · [`Ou
 
 ## C. Uso orquestado de IA
 
-Usé **Claude** (Anthropic) como par técnico para analizar el enunciado y generar el código (.NET, PySpark, dbt y Docker Compose). Mi papel fue dirigir, ejecutar y validar cada paso en mi máquina.
+Usé **Claude** (Anthropic) como par técnico para analizar el enunciado y generar partes del código (PySpark, dbt y Docker Compose). Mi papel fue dirigir, ejecutar y validar cada paso en mi máquina.
 
 **Prompts clave**
 
 | Prompt (resumido) | Para qué sirvió |
 |---|---|
-| "Analiza la información y tracemos una línea para empezar" (con el enunciado completo) | Plan por fases y comparación outbox / CDC / buffer |
-| "No te centres en lo que no te envié" | Frenar a la IA, que especulaba sobre partes del enunciado que no tenía |
-| Errores reales pegados tal cual (instalación, Docker, red) | Corregir con evidencia, no con suposiciones |
+| "Analiza la información y tracemos una línea para empezar a usar outbox y descartar cdc y buffer" | Plan por fases y comparación outbox / CDC / buffer |
+| "En la el archivo src, no agregues el apartado de pruebas, ya que no es parte del proyecto" | Frenar a la IA, que especulaba sobre partes del enunciado que no tenía |
+| Errores de versiones de imagenes al momento de la descarga | Corregir con evidencia, ya que las imagenes no existian
 | Salida completa de la demo | Validar resultados y documentar los límites |
 
 **Dónde la IA se equivocó y cómo se corrigió**
@@ -126,11 +126,9 @@ Usé **Claude** (Anthropic) como par técnico para analizar el enunciado y gener
 | Usó **MinIO** como S3 local sin verificarlo | `pull access denied`: MinIO retiró sus imágenes públicas | Cambio a SeaweedFS (API S3) y verificación de cada imagen en Docker Hub |
 | Indicó `wsl --install` como paso estándar | Devolvió 403 en este equipo | Activar las características de Windows con `dism` y usar `wsl --update --web-download` |
 | Dio por hecho que las imágenes de Microsoft descargarían bien | Timeout de red contra `mcr.microsoft.com` | Pre-descargar con `docker pull` y usar una imagen base menos |
-| Especuló sobre el enunciado | Suponía información que no tenía | Se le pidió trabajar solo con lo entregado |
+| Especuló sobre el enunciado | Suponía información que no tenía | Se le pidió trabajar dentro de los parámetros establecidos en el enuncido |
 
 **Decisiones que asumo y defiendo:** outbox en lugar de CDC o buffer, catálogo REST como sustituto local de Glue, particionamiento por día y purga por lotes de menos de 5000 filas.
-
-**Regla:** nada de lo que sugiere la IA cuenta como hecho hasta que corre en la máquina real.
 
 ---
 
