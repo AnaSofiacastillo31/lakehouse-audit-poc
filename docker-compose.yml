@@ -1,12 +1,4 @@
-# ------------------------------------------------------------------------------------------
-# PoC: ciclo de vida de auditoría  .NET 8 / SQL Server  ->  Outbox  ->  Redpanda  ->  Spark
-#      ->  Apache Iceberg (SeaweedFS S3 + catálogo REST, sustituto local de S3 + Glue)  ->  dbt
-#
-#   docker compose up -d --build                 # flujo continuo (core, relay, ingesta)
-#   docker compose run --rm dbt build            # silver + gold + tests
-#   docker compose run --rm spark-maintenance    # compactación / expiración de snapshots
-#   docker compose run --rm spark-sql -f /opt/jobs/verify.sql
-#
+
 # Presupuesto de memoria pensado para un equipo de 16 GB (WSL 2 limitado a 10 GB).
 # ------------------------------------------------------------------------------------------
 name: lakehouse-audit
@@ -21,7 +13,7 @@ x-core-connection: &core-connection
 
 services:
 
-  # ====================== CORE TRANSACCIONAL (.NET 8 + SQL Server) ======================
+  # ====================== CORE TRANSACCIONL (.NET 8 + SQL Server) ======================
 
   sqlserver:
     image: mcr.microsoft.com/mssql/server:2022-latest
